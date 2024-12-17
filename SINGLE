@@ -1,0 +1,587 @@
+globals[
+  ;Maximum number of requests
+  max-request-time
+  ;Queue layout
+  customer-xinterval ;Interval in the x-direction
+  customer-yinterval ;Interval in the y-direction
+  customers-per-row  ;Number of customers per row
+  ;All consumers in the queue
+  all-in-queue
+]
+
+;;Set up Agents: customers, AI customer service, human customer service, and merchants
+breed[customers customer]
+breed[AI-servers AI-server]
+breed[human-servers human-server]
+breed[merchants merchant]
+
+
+;;Customer attributes, including attributes of requests made
+customers-own [
+  time-sensitive
+  complex-request
+  probability
+  ;Added this attribute to determine waiting time, to calculate expected resolution time
+  time-entered-queue
+  time-entered-service
+  ;mark is a tag used to record the number of merchants contacted for a request
+  mark
+  ;total service time
+  ;expected resolution time
+  expected-resolution-time
+  ;;;record the current merchant
+  chosen-merchant
+  ;;;record the current server
+  chosen-server
+  ;purchase intention
+  purchase-intention
+  ;other merchants not visited
+  rest-merchants
+  ;switch to human server? 1 for yes, 0 for no
+  switch-to-human-server?
+  ;attributes needed to compare satisfaction
+  time-better
+  better-merchant
+  ;maximum tolerable time
+  max-time
+]
+
+merchants-own [
+  ;customer service strategy
+  AI-strategy
+  human-strategy
+  ;product inventory
+  product-inventory
+  ;product sales
+  product-sales
+  ;consumer traffic
+  customer-arrive-num
+  ;AI customer service cost
+  AI-servers-cost
+  ;human customer service cost
+  human-servers-cost
+
+  ;total merchant profit
+  total-profit
+  ;merchant reputation
+  reputation
+  ;records of owned AI and human servers
+  AI-servers-record
+  human-servers-record
+  ;waiting queue
+  queue
+  ;direct purchase by time-sensitive consumers without consulting customer service
+  direct-purchase-num
+  ;waiting time, used to calculate average waiting time
+  waiting-time
+  ;service time, used to calculate average service time
+  service-time
+]
+
+;;Customer service types, AI and human servers, where merchant A uses AI servers and merchant B uses human servers
+AI-servers-own [
+  ;problem-solving ability/service capability
+  ;service-capability
+  ;number of services provided
+  service-times
+  ;service rating
+  service-rating
+  ;degree of anthropomorphism/emotional anthropomorphism
+  human-like
+]
+
+human-servers-own [
+
+  ;problem-solving ability/service capability
+  ;service-capability
+  ;number of services provided
+  service-times
+  ;service rating
+  service-rating
+  ;other parameters
+  customer-being-served
+ ;degree of anthropomorphism/emotional anthropomorphism
+  human-like
+]
+
+
+;;Initialize the model
+to setup
+  clear-all
+  setup-globals
+  setup-merchants
+  setup-customers
+  set-server
+  reset-ticks
+end
+
+
+;;Reset statistics, initialize the queue list, and set agent shapes and other display properties.
+to setup-globals
+  ;Set the queue list and agent shapes
+  set-default-shape AI-servers"server"
+  set-default-shape human-servers"server"
+  set-default-shape customers "person"
+  set-default-shape merchants "house"
+  ;Maximum number of requests
+  set max-request-time 3
+  ;Queue position
+  set customer-xinterval 0.5
+  set customer-yinterval 1
+  set customers-per-row (1 + (world-width - 1) / customer-xinterval)
+
+end
+
+
+;;Create merchants
+to setup-merchants
+  create-merchants 1 [
+    set color red
+    setxy -28 -10
+    set size 2
+    set AI-strategy 0
+    set human-strategy 0
+    ;Set a large number temporarily for product inventory
+    set product-inventory 1000000
+    set product-sales 0
+    set customer-arrive-num 0
+    ;AI customer service cost is not yet determined, the cost of one human server is 10 times that of an AI server, coefficient K
+    set AI-servers-cost AI-strategy
+    set human-servers-cost human-strategy * 10 * human-num
+    set total-profit K * product-sales - AI-servers-cost - human-servers-cost
+    set reputation 5
+    set AI-servers-record nobody
+    set human-servers-record nobody
+    ;Human server waiting queue
+    set queue []
+    set direct-purchase-num 0
+    ;;;;;;;;;;queue-pycor human server’s position
+    set waiting-time []
+    set service-time []
+  ]
+
+end
+
+
+
+to set-server
+  ask merchant 0
+   [
+    set AI-strategy AI
+    set human-strategy human
+   ]
+  if [AI-strategy] of merchant 0 = 1
+ [create-AI-servers 1
+         [
+          let record1 self
+          set color green
+          setxy -24 [pycor] of merchant 0
+          set size 2.75
+          set service-times 0
+          set service-rating []
+          set human-like human-like-degree
+          ask merchant 0 [set AI-servers-record record1]
+         ]
+ ]
+  if [human-strategy] of merchant 0 = 1
+ [let i 0
+   create-human-servers human-num
+      [
+       let record2 self
+       set color blue
+       setxy (-18 + 2 * i) [pycor] of merchant 0
+       set i (i + 1)
+       set size 2.75
+       set service-times 0
+       set service-rating []
+       set human-like 1
+       ask merchant 0 [set human-servers-record (turtle-set record2 human-servers-record)]
+       set customer-being-served nobody
+      ]
+ ]
+end
+
+
+
+
+
+;;Create all customers, set initial attributes, and adjust the ratio of time-sensitive customers and those making complex requests
+to setup-customers
+   create-customers num-customers [
+    setxy -30 20
+    set time-sensitive 0
+    set complex-request 0
+    set time-entered-queue 0
+    set time-entered-service 0
+    set mark 0
+    set chosen-server nobody
+    set purchase-intention (random 10) + 1
+    set rest-merchants merchants
+    set switch-to-human-server? 0
+    set time-better 0
+    set probability 100
+    set max-time 10
+  ]
+    ask n-of (num-customers * rate-ts) customers
+      [set time-sensitive 1
+       set max-time 8]
+    ask n-of (num-customers * rate-complex) customers [set complex-request 1]
+    ask customers [set expected-resolution-time (4 - 2 * time-sensitive)]
+
+end
+
+
+
+;;Run simulation
+to go
+
+  ;Command all customers in the original position to arrive according to a Poisson distribution, controlled arrival rate
+  ifelse count customers-on patch -30 20 >= Lambda + 8
+     [
+      ask n-of random-poisson Lambda customers-on patch -30 20
+       [set chosen-merchant one-of merchants
+        customer-arrive
+       ]
+      ;Interaction and purchasing process
+      interactive-process
+     ]
+     [
+      ifelse count customers-on patch -30 20 > 0
+        [ask customers-on patch -30 20
+          [set chosen-merchant one-of merchants
+           customer-arrive
+          ]
+        interactive-process
+       ]
+       ;Let remaining customers complete service
+       [
+        interactive-process
+        set all-in-queue nobody
+        ask merchants
+          [
+           foreach queue [[?] -> ask ? [set all-in-queue (turtle-set self all-in-queue)]]
+          ]
+        if not any? customers-on (turtle-set AI-servers human-servers) and all-in-queue = nobody
+          [stop]
+      ]
+     ]
+
+end
+
+
+;;Customer arrival and service process
+to customer-arrive
+
+      ifelse [AI-strategy] of chosen-merchant = 1
+      [move-to [AI-servers-record] of chosen-merchant
+       set time-entered-service ticks
+       ask chosen-merchant [set customer-arrive-num customer-arrive-num + 1]
+       set chosen-server [AI-servers-record] of chosen-merchant
+      ]
+      [move-forward length [queue] of chosen-merchant
+       set time-entered-queue ticks
+       let me self
+       ask chosen-merchant [set queue (lput me queue)]
+       human-service-queuing
+      ]
+end
+
+
+;; Move customer to the specified queue position
+to move-forward [queue-position]
+
+  let new-xcor
+    (max-pxcor - customer-xinterval * (queue-position mod customers-per-row))
+  let new-ycor ([pycor] of chosen-merchant + 1 +
+     customer-yinterval * floor (queue-position / customers-per-row))
+  ifelse (new-ycor > max-pycor) [
+    hide-turtle
+  ]
+  [
+    setxy new-xcor new-ycor
+    if (hidden?) [
+      show-turtle
+    ]
+  ]
+end
+
+
+;;If there are customers in the queue and at least one server is free, start service on the first customer in the queue with a randomly selected free server
+;;Continue until all servers are occupied or no one is left in the queue, update queue display, and move each customer forward
+to human-service-queuing
+  let chosen-human-servers [human-servers-record] of chosen-merchant
+  while [not empty? [queue] of chosen-merchant and any? chosen-human-servers with [not is-agent? customer-being-served]]
+        [
+    let next-customer (first [queue] of chosen-merchant)
+    let next-server one-of chosen-human-servers with [not is-agent? customer-being-served]
+    ask chosen-merchant [set queue (but-first queue)]
+    ask next-customer [
+      move-to next-server
+      set chosen-server next-server
+      if switch-to-human-server? = 0
+        [
+         ask chosen-merchant [set customer-arrive-num customer-arrive-num + 1]
+         set time-entered-service ticks
+        ]
+    ]
+    ask next-server [
+      set customer-being-served next-customer
+      set color red
+    ]
+    ask chosen-merchant [
+    (foreach queue (range (length queue)) [
+      [?1 ?2] ->
+      ask ?1 [
+        move-forward ?2
+      ]
+    ])
+   ]
+  ]
+end
+
+
+
+to interactive-process
+  tick
+  ;Remove customers who have timed out in the queue
+  remove-from-queue
+  ;Check if customers being served have exceeded the maximum service rounds, the selected agent should be the customers currently being served, not considering newcomers
+  ask customers-on (turtle-set AI-servers human-servers)
+  [
+   ifelse is-AI-server? chosen-server
+    [AI-servers-process]
+    [human-servers-process]
+  ]
+end
+
+
+to AI-servers-process
+ ;Update probability and determine if the request is resolved
+ ifelse (complex-request = 1)
+   [set probability (probability * 0.95)]
+   [set probability (probability * 0.8)]
+ ;Determine if the request is resolved
+ ifelse (random 100) + 1 > probability
+     [
+      rating-process
+      time-statistics-AI
+      ;Resolved within expected time
+      ifelse ticks - time-entered-service <= expected-resolution-time
+        [purchase-behavior]
+        ;Resolved outside of expected time
+        [
+         ;let P purchase-intention * [human-like] of chosen-server * (time-entered-service + max-time - ticks) / (max-time - expected-resolution-time)
+         ifelse (random 10) + 1 < purchase-intention * [human-like] of chosen-server * (time-entered-service + max-time - ticks) / (max-time - expected-resolution-time)
+           [
+            purchase-behavior
+           ]
+           [
+            ;Comparison process
+            ifelse mark = 0
+              [set better-merchant chosen-merchant
+               set time-better (ticks - time-entered-service)
+              ]
+              ;Use <= instead of <, to choose the latter in case of same request time, reflecting proximity principle
+              [if ticks - time-entered-service - time-better <= 0
+                [set better-merchant chosen-merchant
+                 set time-better (ticks - time-entered-service)]
+              ]
+            ;Not purchasing here
+            not-purchased-here
+           ]
+        ]
+     ]
+     ;If request is not resolved
+     [
+        if ticks - time-entered-service = max-time
+          [rating-process
+           time-statistics-AI
+          ;Not purchasing here
+           not-purchased-here
+          ]
+      ;]
+     ;human-AI collaboration
+     if (complex-request = 1 and [human-strategy] of chosen-merchant = 1) and (expected-resolution-time / 2) = (ticks - time-entered-service)
+        [
+         set switch-to-human-server? 1
+         move-forward length [queue] of chosen-merchant
+         set time-entered-queue ticks
+         let me self
+         ask chosen-merchant [set queue (lput me queue)]
+         human-service-queuing
+        ]
+     ]
+end
+
+
+;;time-entered-queue''''''''''''
+to human-servers-process
+   ;Update probability and determine if the request is resolved
+ ifelse (complex-request = 1)
+     [set probability  (probability * 0.9)]
+     [set probability  (probability * 0.85)]
+   ;Determine if the request is resolved
+   ifelse (random 100) > probability
+     [
+      rating-process
+      time-statistics-human
+      ;Resolved within expected time
+      ifelse ticks - time-entered-queue - ((expected-resolution-time / 2) * switch-to-human-server?) <= expected-resolution-time
+        [complete-service
+         purchase-behavior]
+        ;Resolved outside of expected time
+        [
+         let P purchase-intention * (time-entered-queue + ((expected-resolution-time / 2) * switch-to-human-server?) + max-time - ticks) / (max-time - expected-resolution-time)
+         ifelse (random 10) + 1 < P
+           [complete-service
+            purchase-behavior]
+           [complete-service
+            ;Comparison process
+            ifelse mark = 0
+              [set better-merchant chosen-merchant
+               set time-better (ticks - time-entered-queue)
+              ]
+              ;Use <= instead of <, to choose the latter in case of same request time, reflecting proximity principle
+              [if ticks - time-entered-queue - time-better <= 0
+                [set better-merchant chosen-merchant
+                 set time-better (ticks - time-entered-queue)]
+              ]
+            ;Not purchasing here
+            not-purchased-here
+          ]
+        ]
+     ]
+     ;If request is not resolved
+     [if ticks - time-entered-queue - ((expected-resolution-time / 2) * switch-to-human-server?) = max-time
+        [rating-process
+         time-statistics-human
+         complete-service
+         not-purchased-here
+        ]
+     ]
+end
+
+
+to rating-process
+  let me self
+  ask chosen-server
+    [
+     set service-times service-times + 1
+      set service-rating lput (([time-entered-service] of me + [max-time] of me - ticks) * human-like) service-rating
+    ]
+end
+
+
+
+;Average waiting time and average service time
+to time-statistics-AI
+   let me self
+   ask chosen-merchant
+     [
+      set service-time lput (ticks - [time-entered-service] of me) service-time
+    ]
+end
+
+;(switch-to-human-server? * time-entered-service + (1 - switch-to-human-server?) * time-entered-queue)
+to time-statistics-human
+   let me self
+   ask chosen-merchant
+     [
+      set waiting-time lput ([time-entered-service] of me - [time-entered-queue] of me) waiting-time
+      set service-time lput (ticks - [time-entered-service] of me) service-time
+    ]
+end
+
+
+
+to not-purchased-here
+  not-purchase
+end
+
+
+to purchase-behavior
+   move-to chosen-merchant
+   set mark mark + 1
+   ask chosen-merchant [set product-sales product-sales + 1
+                        set total-profit K * product-sales - AI-servers-cost - human-servers-cost]
+end
+
+
+
+to not-purchase
+  move-to patch 30 -20
+end
+
+
+
+
+
+;;Service complete, customer leaves, and server returns to idle state
+to complete-service
+set switch-to-human-server? 0
+ask chosen-server
+  [
+   set customer-being-served nobody
+   set color blue
+  ]
+end
+
+
+;;If waiting time in queue exceeds maximum tolerable resolution time, leave the queue, move the queue forward to fill the gap, and arrange based on consumer attributes
+to remove-from-queue
+  ;Select all consumers currently in the queue
+  set all-in-queue nobody
+  ask merchants[
+    foreach queue [[?] -> ask ? [set all-in-queue (turtle-set self all-in-queue)]]
+  ]
+  ;
+  if all-in-queue != nobody [
+    ask all-in-queue
+      [
+       if ticks - time-entered-queue > expected-resolution-time - ((expected-resolution-time / 2) * switch-to-human-server?)
+         [
+          let me self
+          ask chosen-merchant
+            [
+             set queue remove me queue
+             (foreach queue (range (length queue)) [
+             [?1 ?2] ->
+             ask ?1
+               [move-forward ?2]
+             ])
+            ]
+          not-purchase
+         ]
+      ]
+   ]
+end
+
+
+;Report the average score of human customer service at a merchant
+to-report human-servers-rate [merchant-num]
+  let mean-rate []
+  foreach [service-rating] of [human-servers-record] of merchant merchant-num [[?] -> ask merchant merchant-num
+  [
+   set mean-rate lput (mean ?) mean-rate
+  ]]
+  report mean mean-rate
+end
+
+
+;Report conversion rate of traffic to sales
+to-report conversion-rate
+  if [customer-arrive-num] of merchant 0 > 0
+    [
+     report [product-sales] of merchant 0 / [customer-arrive-num] of merchant 0
+    ]
+end
+
+;Report profit
+to-report profit-0.01
+  report 0.01 * [product-sales] of merchant 0 - AI - (human * human-num * 10)
+end
+
+to-report profit-0.1
+  report 0.1 * [product-sales] of merchant 0 - AI - (human * human-num * 10)
+end
+
